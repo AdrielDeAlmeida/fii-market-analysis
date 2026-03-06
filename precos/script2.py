@@ -1,5 +1,7 @@
 import requests
+from bs4 import BeautifulSoup
 import pandas as pd
+import re
 import os
 import sys
 from datetime import datetime
@@ -13,58 +15,67 @@ def log(message):
     print(f"[{timestamp}] {message}")
 
 
-def get_fii_data_statusinvest() -> pd.DataFrame:
+def get_fii_data() -> pd.DataFrame:
     """
-    Busca todos os FIIs com preço atual via API interna do Status Invest.
-    Retorna JSON com ticker e cotação D+0 — sem necessidade de Selenium.
+    Busca todos os FIIs com preço atual via fiis.com.br/lista-de-fundos-imobiliarios.
+    Usa requests + BeautifulSoup — sem Selenium, sem API bloqueada.
     """
-    url = "https://statusinvest.com.br/category/advancedsearchresultpaginated"
-    params = {
-        "search": '{"Sector":"","SubSector":"","Segment":"","my_range":"-;-","forecast":{"upsideDownside":{"minValue":"-","maxValue":"-"},"estimatesNumber":{"minValue":"-","maxValue":"-"},"revisedUp":{"minValue":"-","maxValue":"-"},"revisedDown":{"minValue":"-","maxValue":"-"}},"dy":{"minValue":"-","maxValue":"-"},"p_l":{"minValue":"-","maxValue":"-"},"peg_ratio":{"minValue":"-","maxValue":"-"},"p_assets":{"minValue":"-","maxValue":"-"},"p_cap_giro":{"minValue":"-","maxValue":"-"},"p_ebit":{"minValue":"-","maxValue":"-"},"p_ativo_circ_liq":{"minValue":"-","maxValue":"-"},"vpa":{"minValue":"-","maxValue":"-"},"p_vpa":{"minValue":"-","maxValue":"-"},"p_sr":{"minValue":"-","maxValue":"-"},"p_working_cap":{"minValue":"-","maxValue":"-"},"p_fcf":{"minValue":"-","maxValue":"-"},"ev_ebit":{"minValue":"-","maxValue":"-"},"ev_ebitda":{"minValue":"-","maxValue":"-"},"mrg_ebit":{"minValue":"-","maxValue":"-"},"mrg_liq":{"minValue":"-","maxValue":"-"},"liq_corr":{"minValue":"-","maxValue":"-"},"roic":{"minValue":"-","maxValue":"-"},"roe":{"minValue":"-","maxValue":"-"},"patrimonio":{"minValue":"-","maxValue":"-"},"receita_liq":{"minValue":"-","maxValue":"-"},"lucro_liq":{"minValue":"-","maxValue":"-"},"liq":{"minValue":"-","maxValue":"-"}}',
-        "orderColumn": "",
-        "isAsc": "",
-        "page": 0,
-        "take": 2000,
-        "categoryType": 2  # 2 = FIIs
-    }
+    url = "https://fiis.com.br/lista-de-fundos-imobiliarios/"
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         ),
-        "Accept": "application/json, text/plain, */*",
-        "Referer": "https://statusinvest.com.br/fundos-imobiliarios",
-        "X-Requested-With": "XMLHttpRequest",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "pt-BR,pt;q=0.9",
+        "Referer": "https://fiis.com.br/",
     }
 
-    log("Buscando FIIs via API do Status Invest...")
-    resp = requests.get(url, params=params, headers=headers, timeout=30)
+    log(f"Acessando {url}...")
+    resp = requests.get(url, headers=headers, timeout=30)
     resp.raise_for_status()
+    log(f"Status HTTP: {resp.status_code} — {len(resp.text)} chars recebidos.")
 
-    data = resp.json()
-    items = data.get("list", [])
-
-    if not items:
-        raise RuntimeError("API retornou lista vazia.")
-
+    soup = BeautifulSoup(resp.text, "lxml")
     records = []
-    for item in items:
-        ticker = str(item.get("ticker", "")).strip().upper()
-        preco = item.get("price", None)
 
-        if not ticker or preco is None:
-            continue
+    # Todos os links de FIIs têm href no padrão /ticker11/ ou /ticker11b/
+    fii_pattern = re.compile(r'^/[a-z0-9]{4,12}/$')
 
+    for a in soup.find_all("a", href=fii_pattern):
         try:
-            records.append({
-                "papel": ticker,
-                "cotacao": round(float(preco), 2),
-            })
-        except (ValueError, TypeError):
+            # Ticker: primeiro span ou texto direto do link
+            spans = a.find_all("span")
+            if not spans:
+                continue
+
+            ticker = spans[0].get_text(strip=True).upper()
+            if not re.match(r'^[A-Z]{4}[0-9]{2}[A-Z]?$', ticker):
+                continue
+
+            # Preço: procura nos spans um valor numérico válido (ex: "9,72" ou "158,20")
+            preco = None
+            for span in spans:
+                txt = span.get_text(strip=True)
+                txt_norm = txt.replace(".", "").replace(",", ".")
+                try:
+                    val = float(txt_norm)
+                    if val > 0:
+                        preco = round(val, 2)
+                        break
+                except ValueError:
+                    continue
+
+            if not preco:
+                continue
+
+            records.append({"papel": ticker, "cotacao": preco})
+
+        except Exception:
             continue
 
-    df = pd.DataFrame(records)
-    log(f"{len(df)} FIIs extraídos do Status Invest.")
+    df = pd.DataFrame(records).drop_duplicates(subset="papel")
+    log(f"{len(df)} FIIs extraídos de fiis.com.br.")
     return df
 
 
@@ -82,7 +93,7 @@ def main():
     log("Conexão estabelecida!")
 
     # ── Coleta ────────────────────────────────────────────────────────────────
-    df = get_fii_data_statusinvest()
+    df = get_fii_data()
 
     if df.empty:
         log("ERRO: Nenhum dado obtido. Abortando.")
@@ -104,7 +115,7 @@ def main():
         supabase.table("precoreal").insert(batch).execute()
         total_inserted += len(batch)
 
-    log(f"✓ Concluído! {total_inserted} FIIs inseridos na tabela precoreal (preços D+0).")
+    log(f"✓ Concluído! {total_inserted} FIIs inseridos na tabela precoreal.")
 
 
 if __name__ == "__main__":
