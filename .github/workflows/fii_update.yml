@@ -1,0 +1,29 @@
+name: FII Price Update
+
+on:
+  schedule:
+    - cron: '0 21 * * 1-5' # Roda às 18h de Brasília (21h UTC) nos dias úteis (seg-sex)
+  workflow_dispatch: # Permite rodar manualmente pelo site do GitHub
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run script
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python preco/script2.py
