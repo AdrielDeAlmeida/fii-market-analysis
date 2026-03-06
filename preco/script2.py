@@ -22,78 +22,90 @@ def log(message):
     print(f"[{timestamp}] {message}")
 
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+def get_individual_fii_price(session, ticker, url):
+    """Acessa a página individual do FII e extrai o preço real atual."""
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        resp = session.get(url, headers=headers, timeout=15)
+        if resp.status_code != 200:
+            return None
+        
+        soup = BeautifulSoup(resp.text, "lxml")
+        
+        # Procura o valor que fica no topo da página, geralmente dentro de um span ou div destaque
+        # O seletor abaixo busca o valor principal da cotação
+        valor_wrapper = soup.find("div", class_="headerTicker__content__price") 
+        if not valor_wrapper:
+            # Fallback para outros layouts comuns no site
+            valor_wrapper = soup.find("span", string=re.compile(r"R\$"))
+            if valor_wrapper:
+                valor_wrapper = valor_wrapper.parent
+
+        if valor_wrapper:
+            txt = valor_wrapper.get_text(strip=True)
+            # Extrai apenas os números (ex: "R$ 64,02" -> "64.02")
+            match = re.search(r"R\$\s?([\d.,]+)", txt)
+            if match:
+                val_str = match.group(1).replace(".", "").replace(",", ".")
+                return float(val_str)
+    except Exception:
+        pass
+    return None
+
+
 def get_fii_data() -> pd.DataFrame:
     """
-    Busca todos os FIIs com preço atual via fiis.com.br/lista-de-fundos-imobiliarios.
-    Usa requests + BeautifulSoup — sem Selenium, sem API bloqueada.
+    Busca a lista de FIIs e depois acessa cada um em paralelo para pegar o preço real.
     """
-    url = "https://fiis.com.br/lista-de-fundos-imobiliarios/"
+    url_lista = "https://fiis.com.br/lista-de-fundos-imobiliarios/"
     headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "pt-BR,pt;q=0.9",
-        "Referer": "https://fiis.com.br/",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
 
-    log(f"Acessando {url}...")
-    resp = requests.get(url, headers=headers, timeout=30)
+    log("Coletando lista de FIIs...")
+    resp = requests.get(url_lista, headers=headers, timeout=30)
     resp.raise_for_status()
-    log(f"Status HTTP: {resp.status_code} — {len(resp.text)} chars recebidos.")
-
+    
     soup = BeautifulSoup(resp.text, "lxml")
-    records = []
+    fii_links = []
 
-    # Encontra todos os blocos de FIIs, mas ignora os que são apenas 'destaque' 
-    # pois os destaques mostram Dividend Yield em vez de Preço.
+    # Captura todos os blocos tickerBox que possuem links
     boxes = soup.find_all("div", class_="tickerBox")
-    log(f"Encontrados {len(boxes)} blocos tickerBox.")
-
     for box in boxes:
-        try:
-            # Pula os blocos de destaque (esses costumam ter métricas diferentes)
-            if "tickerBox--destaque" in box.get("class", []):
-                continue
-
-            # Ticker: div com classe tickerBox__title
-            ticker_div = box.find("div", class_="tickerBox__title")
-            if not ticker_div:
-                continue
-            ticker = ticker_div.get_text(strip=True).upper()
-            
-            # Validar ticker (ex: MXRF11)
-            if not re.match(r'^[A-Z]{4}[0-9]{2}[A-Z]?$', ticker):
-                continue
-
-            # Preço: os valores ficam dentro de div.tickerBox__info -> div.tickerBox__info__box
-            # Geralmente o primeiro info__box é a cotação e o segundo é o PL ou algo assim
-            info_boxes = box.find_all("div", class_="tickerBox__info__box")
-            if not info_boxes:
-                continue
-            
-            preco = None
-            # Tenta pegar o primeiro valor numérico válido dos info_boxes
-            for info in info_boxes:
-                txt = info.get_text(strip=True)
-                txt_norm = txt.replace(".", "").replace(",", ".")
-                try:
-                    val = float(txt_norm)
-                    if val > 0:
-                        preco = round(val, 2)
-                        break
-                except ValueError:
-                    continue
-
-            if preco:
-                records.append({"papel": ticker, "cotacao": preco})
-
-        except Exception as e:
+        if "tickerBox--destaque" in box.get("class", []):
             continue
+            
+        a_tag = box.find("a", href=True)
+        ticker_div = box.find("div", class_="tickerBox__title")
+        
+        if a_tag and ticker_div:
+            ticker = ticker_div.get_text(strip=True).upper()
+            if re.match(r'^[A-Z]{4}[0-9]{2}[A-Z]?$', ticker):
+                fii_links.append((ticker, a_tag['href']))
+
+    log(f"Iniciando coleta de preços para {len(fii_links)} FIIs em paralelo...")
+    
+    records = []
+    session = requests.Session()
+    
+    # Usa threads para acelerar a coleta (20 por vez)
+    with ThreadPoolExecutor(max_workers=20) as executor:
+        future_to_fii = {executor.submit(get_individual_fii_price, session, t, u): t for t, u in fii_links}
+        for future in as_completed(future_to_fii):
+            ticker = future_to_fii[future]
+            try:
+                preco = future.result()
+                if preco:
+                    records.append({"papel": ticker, "cotacao": preco})
+            except Exception:
+                continue
 
     df = pd.DataFrame(records).drop_duplicates(subset="papel")
-    log(f"{len(df)} FIIs extraídos de fiis.com.br.")
+    log(f"{len(df)} FIIs com preço real extraídos.")
     return df
 
 
