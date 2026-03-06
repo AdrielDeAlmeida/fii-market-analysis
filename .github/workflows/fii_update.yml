@@ -2,7 +2,7 @@ name: FII Price Update
 
 on:
   schedule:
-    - cron: '0 21 * * 1-5' # Roda às 18h de Brasília (21h UTC) nos dias úteis (seg-sex)
+    - cron: '0 14,16,17,19,21 * * *' # Roda às 11h, 13h, 14h, 16h e 18h de Brasília diariamente
   workflow_dispatch: # Permite rodar manualmente pelo site do GitHub
 
 jobs:
