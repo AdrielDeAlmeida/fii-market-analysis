@@ -8,6 +8,12 @@ from datetime import datetime
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
+# Fix SSL: caminho com acentos quebra o curl_cffi/requests no Windows
+_cert_path = r"C:\certs\cacert.pem"
+os.environ["SSL_CERT_FILE"]       = _cert_path
+os.environ["REQUESTS_CA_BUNDLE"]  = _cert_path
+os.environ["CURL_CA_BUNDLE"]      = _cert_path
+
 load_dotenv()
 
 def log(message):
@@ -39,24 +45,32 @@ def get_fii_data() -> pd.DataFrame:
     soup = BeautifulSoup(resp.text, "lxml")
     records = []
 
-    # Todos os links de FIIs têm href no padrão /ticker11/ ou /ticker11b/
-    fii_pattern = re.compile(r'^/[a-z0-9]{4,12}/$')
+    # Encontra todos os blocos de FIIs
+    boxes = soup.find_all("div", class_="tickerBox")
+    log(f"Encontrados {len(boxes)} blocos tickerBox.")
 
-    for a in soup.find_all("a", href=fii_pattern):
+    for box in boxes:
         try:
-            # Ticker: primeiro span ou texto direto do link
-            spans = a.find_all("span")
-            if not spans:
+            # Ticker: div com classe tickerBox__title
+            ticker_div = box.find("div", class_="tickerBox__title")
+            if not ticker_div:
                 continue
-
-            ticker = spans[0].get_text(strip=True).upper()
+            ticker = ticker_div.get_text(strip=True).upper()
+            
+            # Validar ticker (ex: MXRF11)
             if not re.match(r'^[A-Z]{4}[0-9]{2}[A-Z]?$', ticker):
                 continue
 
-            # Preço: procura nos spans um valor numérico válido (ex: "9,72" ou "158,20")
+            # Preço: os valores ficam dentro de div.tickerBox__info -> div.tickerBox__info__box
+            # Geralmente o primeiro info__box é a cotação e o segundo é o PL ou algo assim
+            info_boxes = box.find_all("div", class_="tickerBox__info__box")
+            if not info_boxes:
+                continue
+            
             preco = None
-            for span in spans:
-                txt = span.get_text(strip=True)
+            # Tenta pegar o primeiro valor numérico válido dos info_boxes
+            for info in info_boxes:
+                txt = info.get_text(strip=True)
                 txt_norm = txt.replace(".", "").replace(",", ".")
                 try:
                     val = float(txt_norm)
@@ -66,12 +80,10 @@ def get_fii_data() -> pd.DataFrame:
                 except ValueError:
                     continue
 
-            if not preco:
-                continue
+            if preco:
+                records.append({"papel": ticker, "cotacao": preco})
 
-            records.append({"papel": ticker, "cotacao": preco})
-
-        except Exception:
+        except Exception as e:
             continue
 
     df = pd.DataFrame(records).drop_duplicates(subset="papel")
@@ -88,9 +100,13 @@ def main():
         log("ERRO: Defina SUPABASE_URL e SUPABASE_KEY no ambiente (.env).")
         sys.exit(1)
 
-    log("Conectando ao Supabase...")
-    supabase: Client = create_client(supabase_url, supabase_key)
-    log("Conexão estabelecida!")
+    try:
+        log("Conectando ao Supabase...")
+        supabase: Client = create_client(supabase_url, supabase_key)
+        log("Conexão estabelecida!")
+    except Exception as e:
+        log(f"ERRO ao conectar ao Supabase: {e}")
+        sys.exit(1)
 
     # ── Coleta ────────────────────────────────────────────────────────────────
     df = get_fii_data()
