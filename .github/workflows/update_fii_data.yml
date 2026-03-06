@@ -53,7 +53,7 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        run: python script.py
+        run: python scrip2.py
       
       - name: Notificar sucesso
         if: success()
