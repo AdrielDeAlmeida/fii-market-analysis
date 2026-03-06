@@ -1,4 +1,4 @@
-name: Atualizar Dados FII no Supabase
+name: Atualizar precos FII no Supabase
 
 on:
   schedule:
