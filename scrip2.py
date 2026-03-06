@@ -1,140 +1,105 @@
-import os
-import sys
 import requests
 import pandas as pd
+import os
+import sys
 from datetime import datetime
 from supabase import create_client, Client
 from dotenv import load_dotenv
-from typing import List, Optional, Dict
-from dataclasses import dataclass
 
 load_dotenv()
 
 BRAPI_TOKEN = "5jH55f3zhdwazrTcxrnF4h"
 
-@dataclass
-class Quote:
-    symbol: str
-    short_name: str
-    regular_market_price: float
-    regular_market_change: float
-    regular_market_change_percent: float
-    currency: str
-    market_cap: Optional[float] = None
-    dividend_yield: Optional[float] = None
-    volume: Optional[float] = None
-
-    @classmethod
-    def from_dict(cls, data: Dict) -> 'Quote':
-        return cls(
-            symbol=data['symbol'],
-            short_name=data.get('shortName'),
-            regular_market_price=data.get('regularMarketPrice'),
-            regular_market_change=data.get('regularMarketChange'),
-            regular_market_change_percent=data.get('regularMarketChangePercent'),
-            currency=data.get('currency'),
-            market_cap=data.get('marketCap'),
-            dividend_yield=data.get('dividendYield'),
-            volume=data.get('regularMarketVolume')
-        )
-
-class BrapiClient:
-    BASE_URL = 'https://brapi.dev/api'
-
-    def __init__(self, token: str):
-        self.token = token
-        self.session = requests.Session()
-        self.session.headers.update({'User-Agent': 'Python BrapiClient/1.0'})
-
-    def get_funds_list(self) -> List[str]:
-        """Retorna todos os FIIs listados na B3"""
-        url = f'{self.BASE_URL}/fund/list'
-        params = {'token': self.token}
-        resp = self.session.get(url, params=params, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-        symbols = [item['symbol'] for item in data.get('funds', [])]
-        return symbols
-
-    def get_multiple_quotes(self, tickers: List[str]) -> List[Quote]:
-        """Busca cotações de múltiplos FIIs"""
-        tickers_param = ','.join(tickers)
-        url = f'{self.BASE_URL}/quote/fund/{tickers_param}'
-        params = {'token': self.token}
-        resp = self.session.get(url, params=params, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-        return [Quote.from_dict(item) for item in data.get('results', [])]
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        self.session.close()
-
 def log(message):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] {message}")
+
+def fetch_all_fiis(token):
+    """Busca todas as cotações de FIIs paginadas da BRAPI"""
+    all_fiis = []
+    limit = 100
+    page = 1
+
+    while True:
+        url = "https://brapi.dev/api/quote/list"
+        params = {
+            "token": token,
+            "type": "fund",
+            "limit": limit,
+            "page": page
+        }
+        response = requests.get(url, params=params, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+
+        results = data.get("results", [])
+        if not results:
+            break
+
+        all_fiis.extend(results)
+        log(f"Página {page} — {len(results)} FIIs obtidos")
+
+        # Verifica se há mais páginas
+        total_count = data.get("totalCount", 0)
+        if page * limit >= total_count:
+            break
+        page += 1
+
+    return all_fiis
 
 def main():
     try:
         supabase_url = os.getenv("SUPABASE_URL")
         supabase_key = os.getenv("SUPABASE_KEY")
+
         if not supabase_url or not supabase_key:
             log("ERRO: Variáveis SUPABASE_URL e SUPABASE_KEY obrigatórias")
             sys.exit(1)
 
-        supabase: Client = create_client(supabase_url, supabase_key)
-        log("Conectado ao Supabase")
+        log("Conectando ao Supabase...")
+        supabase = create_client(supabase_url, supabase_key)
 
-        with BrapiClient(BRAPI_TOKEN) as client:
-            # 1️⃣ Pegar todos os FIIs
-            tickers = client.get_funds_list()
-            log(f"{len(tickers)} FIIs encontrados")
+        log("Buscando lista completa de FIIs via BRAPI...")
+        all_fiis = fetch_all_fiis(BRAPI_TOKEN)
+        log(f"Total geral de FIIs encontrados: {len(all_fiis)}")
 
-            # 2️⃣ Puxar cotações em lotes
-            batch_size = 50
-            registros = []
-
-            for i in range(0, len(tickers), batch_size):
-                batch = tickers[i:i+batch_size]
-                log(f"Consultando lote {i//batch_size + 1} ({len(batch)} FIIs)")
-                quotes = client.get_multiple_quotes(batch)
-                for q in quotes:
-                    registros.append({
-                        "papel": q.symbol,
-                        "segmento": None,
-                        "cotacao": q.regular_market_price,
-                        "ffo_yield": None,
-                        "dividend_yield": q.dividend_yield,
-                        "p_vp": None,
-                        "valor_mercado": q.market_cap,
-                        "liquidez": q.volume,
-                        "qtd_imoveis": None,
-                        "preco_m2": None,
-                        "aluguel_m2": None,
-                        "cap_rate": None,
-                        "vacancia_media": None,
-                        "data_atualizacao": datetime.now().isoformat()
-                    })
+        registros = []
+        for ativo in all_fiis:
+            registros.append({
+                "papel": ativo.get("symbol"),
+                "segmento": None,
+                "cotacao": ativo.get("close"),
+                "ffo_yield": None,
+                "dividend_yield": ativo.get("dividendYield"),
+                "p_vp": None,
+                "valor_mercado": ativo.get("marketCap"),
+                "liquidez": ativo.get("volume"),
+                "qtd_imoveis": None,
+                "preco_m2": None,
+                "aluguel_m2": None,
+                "cap_rate": None,
+                "vacancia_media": None,
+                "data_atualizacao": datetime.now().isoformat()
+            })
 
         df = pd.DataFrame(registros)
-        log(f"Total de {len(df)} registros coletados")
+        log(f"DataFrame criado com {len(df)} registros")
 
-        # 3️⃣ Limpar tabela antiga e inserir novos dados
-        log("Limpando dados antigos")
+        log("Limpando dados antigos no Supabase...")
         supabase.table("fii_fundamentus").delete().neq("papel", "").execute()
 
+        batch_size = 100
         total_inserted = 0
+
         for i in range(0, len(df), batch_size):
             batch = df.iloc[i:i+batch_size].to_dict("records")
             supabase.table("fii_fundamentus").insert(batch).execute()
             total_inserted += len(batch)
 
-        log(f"✓ Sucesso! {total_inserted} registros inseridos")
+        log(f"✓ Sucesso! {total_inserted} registros inseridos no Supabase")
 
     except Exception as e:
-        log(f"✗ ERRO: {e}")
+        log(f"✗ ERRO: {str(e)}")
         import traceback
         traceback.print_exc()
         sys.exit(1)
