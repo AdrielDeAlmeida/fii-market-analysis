@@ -12,9 +12,10 @@ from dotenv import load_dotenv
 
 # Fix SSL: caminho com acentos quebra o curl_cffi/requests no Windows
 _cert_path = r"C:\certs\cacert.pem"
-os.environ["SSL_CERT_FILE"]       = _cert_path
-os.environ["REQUESTS_CA_BUNDLE"]  = _cert_path
-os.environ["CURL_CA_BUNDLE"]      = _cert_path
+if os.path.exists(_cert_path):
+    os.environ["SSL_CERT_FILE"]       = _cert_path
+    os.environ["REQUESTS_CA_BUNDLE"]  = _cert_path
+    os.environ["CURL_CA_BUNDLE"]      = _cert_path
 
 load_dotenv()
 
