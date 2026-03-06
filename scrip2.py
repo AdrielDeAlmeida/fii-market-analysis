@@ -9,43 +9,59 @@ from dotenv import load_dotenv
 load_dotenv()
 
 BRAPI_TOKEN = "5jH55f3zhdwazrTcxrnF4h"
+ANBIMA_BASE_URL = "https://api.anbima.com.br/feed/fundos/v1"
 
 def log(message):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] {message}")
 
-def fetch_all_fiis(token):
-    """Busca todas as cotações de FIIs paginadas da BRAPI"""
-    all_fiis = []
-    limit = 100
+def fetch_anbima_funds():
+    """Busca todos os fundos da ANBIMA com paginação."""
+    all_funds = []
     page = 1
+    size = 1000
 
     while True:
-        url = "https://brapi.dev/api/quote/list"
-        params = {
-            "token": token,
-            "type": "fund",
-            "limit": limit,
-            "page": page
-        }
+        url = f"{ANBIMA_BASE_URL}/fundos"
+        params = {"page": page, "size": size}
         response = requests.get(url, params=params, timeout=30)
         response.raise_for_status()
         data = response.json()
 
-        results = data.get("results", [])
-        if not results:
+        if not data:
             break
 
-        all_fiis.extend(results)
-        log(f"Página {page} — {len(results)} FIIs obtidos")
+        all_funds.extend(data)
+        log(f"ANBIMA: página {page} — {len(data)} fundos")
 
-        # Verifica se há mais páginas
-        total_count = data.get("totalCount", 0)
-        if page * limit >= total_count:
+        if len(data) < size:
             break
         page += 1
 
-    return all_fiis
+    return all_funds
+
+def filter_fiis(funds):
+    """Filtra fundos que parecem FIIs com base no nome/ISIN."""
+    fii_list = []
+    for f in funds:
+        isin = f.get("codigo_isin", "")
+        name = f.get("nome_fantasia", "").upper()
+        # Heurística: ticker/ISIN com "FII" ou nome com fundo imobiliário
+        if "FII" in name or isin.endswith("11"):
+            fii_list.append(f)
+    return fii_list
+
+def fetch_brp_quote(ticker):
+    """Busca cotação via BRAPI para um ticker."""
+    url = f"https://brapi.dev/api/quote/{ticker}"
+    params = {"token": BRAPI_TOKEN}
+    response = requests.get(url, params=params, timeout=15)
+    response.raise_for_status()
+    data = response.json()
+    results = data.get("results")
+    if results:
+        return results[0]
+    return None
 
 def main():
     try:
@@ -53,27 +69,38 @@ def main():
         supabase_key = os.getenv("SUPABASE_KEY")
 
         if not supabase_url or not supabase_key:
-            log("ERRO: Variáveis SUPABASE_URL e SUPABASE_KEY obrigatórias")
+            log("ERRO: SUPABASE_URL e SUPABASE_KEY obrigatórias")
             sys.exit(1)
 
         log("Conectando ao Supabase...")
-        supabase = create_client(supabase_url, supabase_key)
+        supabase: Client = create_client(supabase_url, supabase_key)
 
-        log("Buscando lista completa de FIIs via BRAPI...")
-        all_fiis = fetch_all_fiis(BRAPI_TOKEN)
-        log(f"Total geral de FIIs encontrados: {len(all_fiis)}")
+        log("Buscando lista completa de fundos na ANBIMA...")
+        all_funds = fetch_anbima_funds()
+        log(f"{len(all_funds)} fundos totais encontrados na ANBIMA")
+
+        log("Filtrando FIIs...")
+        fii_candidates = filter_fiis(all_funds)
+        log(f"{len(fii_candidates)} fundos candidatos a FII após filtragem")
 
         registros = []
-        for ativo in all_fiis:
+        for f in fii_candidates:
+            ticker = f.get("codigo_isin")[:6]  # pegar as primeiras 6 letras como ticker
+            quote = None
+            try:
+                quote = fetch_brp_quote(ticker)
+            except Exception as e:
+                log(f"BRAPI erro no ticker {ticker}: {str(e)}")
+
             registros.append({
-                "papel": ativo.get("symbol"),
+                "papel": ticker,
                 "segmento": None,
-                "cotacao": ativo.get("close"),
+                "cotacao": quote.get("regularMarketPrice") if quote else None,
                 "ffo_yield": None,
-                "dividend_yield": ativo.get("dividendYield"),
+                "dividend_yield": quote.get("dividendYield") if quote else None,
                 "p_vp": None,
-                "valor_mercado": ativo.get("marketCap"),
-                "liquidez": ativo.get("volume"),
+                "valor_mercado": quote.get("marketCap") if quote else None,
+                "liquidez": quote.get("regularMarketVolume") if quote else None,
                 "qtd_imoveis": None,
                 "preco_m2": None,
                 "aluguel_m2": None,
@@ -83,9 +110,9 @@ def main():
             })
 
         df = pd.DataFrame(registros)
-        log(f"DataFrame criado com {len(df)} registros")
+        log(f"Total de {len(df)} registros FIIs coletados")
 
-        log("Limpando dados antigos no Supabase...")
+        log("Limpando tabela antiga no Supabase...")
         supabase.table("fii_fundamentus").delete().neq("papel", "").execute()
 
         batch_size = 100
