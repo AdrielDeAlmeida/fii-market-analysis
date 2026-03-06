@@ -12,10 +12,9 @@ from dotenv import load_dotenv
 
 # Fix SSL: caminho com acentos quebra o curl_cffi/requests no Windows
 _cert_path = r"C:\certs\cacert.pem"
-if os.path.exists(_cert_path):
-    os.environ["SSL_CERT_FILE"]       = _cert_path
-    os.environ["REQUESTS_CA_BUNDLE"]  = _cert_path
-    os.environ["CURL_CA_BUNDLE"]      = _cert_path
+os.environ["SSL_CERT_FILE"]       = _cert_path
+os.environ["REQUESTS_CA_BUNDLE"]  = _cert_path
+os.environ["CURL_CA_BUNDLE"]      = _cert_path
 
 load_dotenv()
 
@@ -27,57 +26,47 @@ def log(message):
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 def get_individual_fii_price(ticker, url):
-    """Acessa a página individual do FII e extrai o preço real atual com sistema anti-bloqueio."""
+    """Acessa a página individual do FII no FundsExplorer e extrai o preço real e a variação diária."""
     for tentativa in range(3):
         try:
-            # Pausa aleatória para não sobrecarregar o site e disfarçar o robô
             time.sleep(random.uniform(0.5, 2.0))
             
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             }
-            # Cada thread faz sua própria requisição isolada para evitar sobreposição de conexões
             resp = requests.get(url, headers=headers, timeout=20)
             
             if resp.status_code == 403 or resp.status_code == 429:
-                # Se fomos bloqueados por estar muito rápido, espera mais tempo e tenta de novo
                 time.sleep(random.uniform(3.0, 6.0))
                 continue
-                
             if resp.status_code != 200:
                 continue
             
             soup = BeautifulSoup(resp.text, "lxml")
+            preco_val, var_val = None, None
             
-            # Procura o valor que fica no topo da página
-            valor_wrapper = soup.find("div", class_="headerTicker__content__price") 
-            if not valor_wrapper:
-                valor_wrapper = soup.find("span", string=re.compile(r"R\$"))
-                if valor_wrapper:
-                    valor_wrapper = valor_wrapper.parent
-
+            # FundsExplorer tem a cotação e variação na mesma div de cabeçalho
+            valor_wrapper = soup.find("div", class_="headerTicker__content__price")
             if valor_wrapper:
-                text_nodes = [t.strip() for t in valor_wrapper.find_all(string=True)]
-                for i, t in enumerate(text_nodes):
-                    if 'R$' in t:
-                        for price_txt in text_nodes[i+1:]:
-                            if price_txt:
-                                match = re.search(r'^([\d.,]+)', price_txt)
-                                if match:
-                                    val_str = match.group(1).replace(".", "").replace(",", ".")
-                                    return float(val_str)
-                
-                txt = valor_wrapper.get_text(separator=' ', strip=True)
-                match = re.search(r"R\$\s*([\d.]+,\d{1,2})", txt)
-                if match:
-                    val_str = match.group(1).replace(".", "").replace(",", ".")
-                    return float(val_str)
-                    
-            # Se chegou até aqui com sucesso, sai do loop de tentativas
+                text_nodes = [t.strip() for t in valor_wrapper.find_all(string=True) if t.strip()]
+                for t in text_nodes:
+                    if "R$" in t:
+                        match = re.search(r"R\$\s?([\d.,]+)", t)
+                        if match:
+                            preco_val = float(match.group(1).replace(".", "").replace(",", "."))
+                    elif "%" in t:
+                        match = re.search(r"([-+]?[\d.,]+)%", t)
+                        if match:
+                            var_val = float(match.group(1).replace(".", "").replace(",", "."))
+            
+            # Se encontrou ao menos o preço, retorna com sucesso
+            if preco_val is not None:
+                return {"cotacao": preco_val, "variacao": var_val if var_val is not None else 0.0}
+            
             break
         except Exception:
             time.sleep(1)
-    
+            
     return None
 def get_fii_data() -> pd.DataFrame:
     """
@@ -107,7 +96,8 @@ def get_fii_data() -> pd.DataFrame:
         if a_tag and ticker_div:
             ticker = ticker_div.get_text(strip=True).upper()
             if re.match(r'^[A-Z]{4}[0-9]{2}[A-Z]?$', ticker):
-                fii_links.append((ticker, "https://fiis.com.br" + a_tag['href'] if a_tag['href'].startswith('/') else a_tag['href']))
+                # Migrando para a URL do FundsExplorer para obter a cotação real e a variação
+                fii_links.append((ticker, f"https://www.fundsexplorer.com.br/funds/{ticker.lower()}"))
 
     log(f"Iniciando coleta de preços para {len(fii_links)} FIIs em paralelo (demora ~3 a 4 minutos)...")
     
@@ -118,9 +108,13 @@ def get_fii_data() -> pd.DataFrame:
         for future in as_completed(future_to_fii):
             ticker = future_to_fii[future]
             try:
-                preco = future.result()
-                if preco:
-                    records.append({"papel": ticker, "cotacao": preco})
+                resultado = future.result()
+                if resultado:
+                    records.append({
+                        "papel": ticker, 
+                        "cotacao": resultado["cotacao"],
+                        "variacao": resultado["variacao"]
+                    })
             except Exception:
                 continue
 
