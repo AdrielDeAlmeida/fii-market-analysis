@@ -1,7 +1,4 @@
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
+import requests
 import pandas as pd
 import os
 import sys
@@ -18,70 +15,57 @@ def log(message):
 
 def get_fii_data_statusinvest() -> pd.DataFrame:
     """
-    Busca todos os FIIs com preço atual diretamente do Status Invest via Selenium.
-    O Status Invest exibe cotação D+0 durante o pregão.
+    Busca todos os FIIs com preço atual via API interna do Status Invest.
+    Retorna JSON com ticker e cotação D+0 — sem necessidade de Selenium.
     """
-    driver = None
-    try:
-        log("Configurando WebDriver...")
-        options = webdriver.ChromeOptions()
-        options.add_argument("--headless")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--disable-gpu")
-        options.add_argument(
-            "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    url = "https://statusinvest.com.br/category/advancedsearchresultpaginated"
+    params = {
+        "search": '{"Sector":"","SubSector":"","Segment":"","my_range":"-;-","forecast":{"upsideDownside":{"minValue":"-","maxValue":"-"},"estimatesNumber":{"minValue":"-","maxValue":"-"},"revisedUp":{"minValue":"-","maxValue":"-"},"revisedDown":{"minValue":"-","maxValue":"-"}},"dy":{"minValue":"-","maxValue":"-"},"p_l":{"minValue":"-","maxValue":"-"},"peg_ratio":{"minValue":"-","maxValue":"-"},"p_assets":{"minValue":"-","maxValue":"-"},"p_cap_giro":{"minValue":"-","maxValue":"-"},"p_ebit":{"minValue":"-","maxValue":"-"},"p_ativo_circ_liq":{"minValue":"-","maxValue":"-"},"vpa":{"minValue":"-","maxValue":"-"},"p_vpa":{"minValue":"-","maxValue":"-"},"p_sr":{"minValue":"-","maxValue":"-"},"p_working_cap":{"minValue":"-","maxValue":"-"},"p_fcf":{"minValue":"-","maxValue":"-"},"ev_ebit":{"minValue":"-","maxValue":"-"},"ev_ebitda":{"minValue":"-","maxValue":"-"},"mrg_ebit":{"minValue":"-","maxValue":"-"},"mrg_liq":{"minValue":"-","maxValue":"-"},"liq_corr":{"minValue":"-","maxValue":"-"},"roic":{"minValue":"-","maxValue":"-"},"roe":{"minValue":"-","maxValue":"-"},"patrimonio":{"minValue":"-","maxValue":"-"},"receita_liq":{"minValue":"-","maxValue":"-"},"lucro_liq":{"minValue":"-","maxValue":"-"},"liq":{"minValue":"-","maxValue":"-"}}',
+        "orderColumn": "",
+        "isAsc": "",
+        "page": 0,
+        "take": 2000,
+        "categoryType": 2  # 2 = FIIs
+    }
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        )
-        driver = webdriver.Chrome(options=options)
-        driver.set_page_load_timeout(60)
+        ),
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://statusinvest.com.br/fundos-imobiliarios",
+        "X-Requested-With": "XMLHttpRequest",
+    }
 
-        url = "https://statusinvest.com.br/fundos-imobiliarios"
-        log(f"Acessando {url}...")
-        driver.get(url)
+    log("Buscando FIIs via API do Status Invest...")
+    resp = requests.get(url, params=params, headers=headers, timeout=30)
+    resp.raise_for_status()
 
-        wait = WebDriverWait(driver, 60)
-        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "table.default-fiis-table tbody tr")))
-        log("Tabela carregada, extraindo dados...")
+    data = resp.json()
+    items = data.get("list", [])
 
-        rows = driver.find_elements(By.CSS_SELECTOR, "table.default-fiis-table tbody tr")
+    if not items:
+        raise RuntimeError("API retornou lista vazia.")
 
-        records = []
-        for row in rows:
-            try:
-                cols = row.find_elements(By.TAG_NAME, "td")
-                if len(cols) < 2:
-                    continue
+    records = []
+    for item in items:
+        ticker = str(item.get("ticker", "")).strip().upper()
+        preco = item.get("price", None)
 
-                ticker = (cols[0].get_attribute("title") or cols[0].text).strip().upper()
-                preco_raw = (cols[1].get_attribute("title") or cols[1].text).strip()
+        if not ticker or preco is None:
+            continue
 
-                preco_raw = (
-                    preco_raw
-                    .replace("R$", "")
-                    .replace("\xa0", "")
-                    .replace(".", "")
-                    .replace(",", ".")
-                    .strip()
-                )
+        try:
+            records.append({
+                "papel": ticker,
+                "cotacao": round(float(preco), 2),
+            })
+        except (ValueError, TypeError):
+            continue
 
-                if not ticker or not preco_raw:
-                    continue
-
-                preco = float(preco_raw)
-                records.append({"papel": ticker, "cotacao": round(preco, 2)})
-
-            except Exception:
-                continue
-
-        df = pd.DataFrame(records)
-        log(f"{len(df)} FIIs extraídos do Status Invest.")
-        return df
-
-    finally:
-        if driver:
-            driver.quit()
-            log("WebDriver fechado.")
+    df = pd.DataFrame(records)
+    log(f"{len(df)} FIIs extraídos do Status Invest.")
+    return df
 
 
 def main():
@@ -101,7 +85,7 @@ def main():
     df = get_fii_data_statusinvest()
 
     if df.empty:
-        log("ERRO: Nenhum dado obtido do Status Invest. Abortando.")
+        log("ERRO: Nenhum dado obtido. Abortando.")
         sys.exit(1)
 
     df["data_atualizacao"] = datetime.now().isoformat()
