@@ -2,9 +2,7 @@ from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-import yfinance as yf
 import pandas as pd
-from io import StringIO
 import os
 import sys
 from datetime import datetime
@@ -18,8 +16,11 @@ def log(message):
     print(f"[{timestamp}] {message}")
 
 
-def get_fii_tickers_selenium() -> list[str]:
-    """Usa Selenium para buscar a lista de tickers do Fundamentus (bypassa 403)."""
+def get_fii_data_statusinvest() -> pd.DataFrame:
+    """
+    Busca todos os FIIs com preço atual diretamente do Status Invest via Selenium.
+    O Status Invest exibe cotação D+0 durante o pregão.
+    """
     driver = None
     try:
         log("Configurando WebDriver...")
@@ -33,66 +34,54 @@ def get_fii_tickers_selenium() -> list[str]:
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
         driver = webdriver.Chrome(options=options)
-        driver.set_page_load_timeout(30)
+        driver.set_page_load_timeout(60)
 
-        url = "https://www.fundamentus.com.br/fii_resultado.php"
+        url = "https://statusinvest.com.br/fundos-imobiliarios"
         log(f"Acessando {url}...")
         driver.get(url)
 
-        wait = WebDriverWait(driver, 30)
-        table = wait.until(EC.presence_of_element_located((By.ID, "tabelaResultado")))
-        html_content = table.get_attribute("outerHTML")
-        log("Tabela carregada com sucesso!")
+        wait = WebDriverWait(driver, 60)
+        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "table.default-fiis-table tbody tr")))
+        log("Tabela carregada, extraindo dados...")
 
-        df = pd.read_html(StringIO(html_content))[0]
-        # Primeira coluna = papel/ticker
-        tickers = df.iloc[:, 0].astype(str).str.strip().tolist()
-        tickers = [t for t in tickers if t and t != "nan"]
+        rows = driver.find_elements(By.CSS_SELECTOR, "table.default-fiis-table tbody tr")
 
-        log(f"{len(tickers)} tickers encontrados no Fundamentus.")
-        return tickers
+        records = []
+        for row in rows:
+            try:
+                cols = row.find_elements(By.TAG_NAME, "td")
+                if len(cols) < 2:
+                    continue
+
+                ticker = (cols[0].get_attribute("title") or cols[0].text).strip().upper()
+                preco_raw = (cols[1].get_attribute("title") or cols[1].text).strip()
+
+                preco_raw = (
+                    preco_raw
+                    .replace("R$", "")
+                    .replace("\xa0", "")
+                    .replace(".", "")
+                    .replace(",", ".")
+                    .strip()
+                )
+
+                if not ticker or not preco_raw:
+                    continue
+
+                preco = float(preco_raw)
+                records.append({"papel": ticker, "cotacao": round(preco, 2)})
+
+            except Exception:
+                continue
+
+        df = pd.DataFrame(records)
+        log(f"{len(df)} FIIs extraídos do Status Invest.")
+        return df
 
     finally:
         if driver:
             driver.quit()
             log("WebDriver fechado.")
-
-
-def get_realtime_prices(tickers: list[str]) -> pd.DataFrame:
-    """Busca preço D+0 via yfinance para cada ticker da B3 (.SA)."""
-    yahoo_tickers = [f"{t}.SA" for t in tickers]
-
-    log(f"Buscando preços em tempo real para {len(yahoo_tickers)} FIIs via Yahoo Finance...")
-
-    raw = yf.download(
-        tickers=yahoo_tickers,
-        period="1d",
-        interval="1m",
-        group_by="ticker",
-        auto_adjust=True,
-        progress=False,
-        threads=True,
-    )
-
-    records = []
-    for ticker_sa, ticker_original in zip(yahoo_tickers, tickers):
-        try:
-            if len(yahoo_tickers) == 1:
-                last_price = float(raw["Close"].dropna().iloc[-1])
-            else:
-                last_price = float(raw[ticker_sa]["Close"].dropna().iloc[-1])
-
-            records.append({
-                "papel": ticker_original,
-                "cotacao": round(last_price, 2),
-                "data_atualizacao": datetime.now().isoformat(),
-            })
-        except Exception:
-            log(f"  ⚠ Sem dado para {ticker_original} — ignorado.")
-
-    df = pd.DataFrame(records)
-    log(f"{len(df)} FIIs com preço D+0 obtido.")
-    return df
 
 
 def main():
@@ -109,12 +98,13 @@ def main():
     log("Conexão estabelecida!")
 
     # ── Coleta ────────────────────────────────────────────────────────────────
-    tickers = get_fii_tickers_selenium()
-    df = get_realtime_prices(tickers)
+    df = get_fii_data_statusinvest()
 
     if df.empty:
-        log("ERRO: Nenhum preço obtido. Abortando.")
+        log("ERRO: Nenhum dado obtido do Status Invest. Abortando.")
         sys.exit(1)
+
+    df["data_atualizacao"] = datetime.now().isoformat()
 
     # ── Supabase: limpa e insere ──────────────────────────────────────────────
     log("Limpando dados antigos da tabela precoreal...")
@@ -130,7 +120,7 @@ def main():
         supabase.table("precoreal").insert(batch).execute()
         total_inserted += len(batch)
 
-    log(f"✓ Concluído! {total_inserted} registros inseridos no Supabase (preços D+0).")
+    log(f"✓ Concluído! {total_inserted} FIIs inseridos na tabela precoreal (preços D+0).")
 
 
 if __name__ == "__main__":
