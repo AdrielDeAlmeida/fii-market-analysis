@@ -4,6 +4,8 @@ import pandas as pd
 import re
 import os
 import sys
+import time
+import random
 from datetime import datetime
 from supabase import create_client, Client
 from dotenv import load_dotenv
@@ -24,53 +26,62 @@ def log(message):
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-def get_individual_fii_price(session, ticker, url):
-    """Acessa a página individual do FII e extrai o preço real atual."""
-    try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
-        resp = session.get(url, headers=headers, timeout=15)
-        if resp.status_code != 200:
-            return None
-        
-        soup = BeautifulSoup(resp.text, "lxml")
-        
-        # Procura o valor que fica no topo da página, geralmente dentro de um span ou div destaque
-        # O seletor abaixo busca o valor principal da cotação
-        valor_wrapper = soup.find("div", class_="headerTicker__content__price") 
-        if not valor_wrapper:
-            # Fallback para outros layouts comuns no site
-            valor_wrapper = soup.find("span", string=re.compile(r"R\$"))
-            if valor_wrapper:
-                valor_wrapper = valor_wrapper.parent
-
-        if valor_wrapper:
-            text_nodes = [t.strip() for t in valor_wrapper.find_all(string=True)]
-            for i, t in enumerate(text_nodes):
-                if 'R$' in t:
-                    # O preço real é logo no próximo texto após o R$
-                    for price_txt in text_nodes[i+1:]:
-                        if price_txt:
-                            match = re.search(r'^([\d.,]+)', price_txt)
-                            if match:
-                                val_str = match.group(1).replace(".", "").replace(",", ".")
-                                return float(val_str)
+def get_individual_fii_price(ticker, url):
+    """Acessa a página individual do FII e extrai o preço real atual com sistema anti-bloqueio."""
+    for tentativa in range(3):
+        try:
+            # Pausa aleatória para não sobrecarregar o site e disfarçar o robô
+            time.sleep(random.uniform(0.5, 2.0))
             
-            # Fallback de segurança na busca antiga se os textos estiverem juntos
-            txt = valor_wrapper.get_text(separator=' ', strip=True)
-            match = re.search(r"R\$\s*([\d.]+,\d{1,2})", txt)
-            if match:
-                val_str = match.group(1).replace(".", "").replace(",", ".")
-                return float(val_str)
-    except Exception:
-        pass
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+            # Cada thread faz sua própria requisição isolada para evitar sobreposição de conexões
+            resp = requests.get(url, headers=headers, timeout=20)
+            
+            if resp.status_code == 403 or resp.status_code == 429:
+                # Se fomos bloqueados por estar muito rápido, espera mais tempo e tenta de novo
+                time.sleep(random.uniform(3.0, 6.0))
+                continue
+                
+            if resp.status_code != 200:
+                continue
+            
+            soup = BeautifulSoup(resp.text, "lxml")
+            
+            # Procura o valor que fica no topo da página
+            valor_wrapper = soup.find("div", class_="headerTicker__content__price") 
+            if not valor_wrapper:
+                valor_wrapper = soup.find("span", string=re.compile(r"R\$"))
+                if valor_wrapper:
+                    valor_wrapper = valor_wrapper.parent
+
+            if valor_wrapper:
+                text_nodes = [t.strip() for t in valor_wrapper.find_all(string=True)]
+                for i, t in enumerate(text_nodes):
+                    if 'R$' in t:
+                        for price_txt in text_nodes[i+1:]:
+                            if price_txt:
+                                match = re.search(r'^([\d.,]+)', price_txt)
+                                if match:
+                                    val_str = match.group(1).replace(".", "").replace(",", ".")
+                                    return float(val_str)
+                
+                txt = valor_wrapper.get_text(separator=' ', strip=True)
+                match = re.search(r"R\$\s*([\d.]+,\d{1,2})", txt)
+                if match:
+                    val_str = match.group(1).replace(".", "").replace(",", ".")
+                    return float(val_str)
+                    
+            # Se chegou até aqui com sucesso, sai do loop de tentativas
+            break
+        except Exception:
+            time.sleep(1)
+    
     return None
-
-
 def get_fii_data() -> pd.DataFrame:
     """
-    Busca a lista de FIIs e depois acessa cada um em paralelo para pegar o preço real.
+    Busca a lista de FIIs e depois acessa cada um em paralelo para pegar a cotação real.
     """
     url_lista = "https://fiis.com.br/lista-de-fundos-imobiliarios/"
     headers = {
@@ -84,9 +95,9 @@ def get_fii_data() -> pd.DataFrame:
     soup = BeautifulSoup(resp.text, "lxml")
     fii_links = []
 
-    # Captura todos os blocos tickerBox que possuem links
     boxes = soup.find_all("div", class_="tickerBox")
     for box in boxes:
+        # Pula as boxes de destaque pois os mesmos FIIs já estão na lista completax
         if "tickerBox--destaque" in box.get("class", []):
             continue
             
@@ -96,16 +107,14 @@ def get_fii_data() -> pd.DataFrame:
         if a_tag and ticker_div:
             ticker = ticker_div.get_text(strip=True).upper()
             if re.match(r'^[A-Z]{4}[0-9]{2}[A-Z]?$', ticker):
-                fii_links.append((ticker, a_tag['href']))
+                fii_links.append((ticker, "https://fiis.com.br" + a_tag['href'] if a_tag['href'].startswith('/') else a_tag['href']))
 
-    log(f"Iniciando coleta de preços para {len(fii_links)} FIIs em paralelo...")
+    log(f"Iniciando coleta de preços para {len(fii_links)} FIIs em paralelo (demora ~3 a 4 minutos)...")
     
     records = []
-    session = requests.Session()
     
-    # Usa threads para acelerar a coleta (20 por vez)
-    with ThreadPoolExecutor(max_workers=20) as executor:
-        future_to_fii = {executor.submit(get_individual_fii_price, session, t, u): t for t, u in fii_links}
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        future_to_fii = {executor.submit(get_individual_fii_price, t, u): t for t, u in fii_links}
         for future in as_completed(future_to_fii):
             ticker = future_to_fii[future]
             try:
