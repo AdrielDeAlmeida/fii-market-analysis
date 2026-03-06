@@ -46,12 +46,17 @@ def get_fii_data() -> pd.DataFrame:
     soup = BeautifulSoup(resp.text, "lxml")
     records = []
 
-    # Encontra todos os blocos de FIIs
+    # Encontra todos os blocos de FIIs, mas ignora os que são apenas 'destaque' 
+    # pois os destaques mostram Dividend Yield em vez de Preço.
     boxes = soup.find_all("div", class_="tickerBox")
     log(f"Encontrados {len(boxes)} blocos tickerBox.")
 
     for box in boxes:
         try:
+            # Pula os blocos de destaque (esses costumam ter métricas diferentes)
+            if "tickerBox--destaque" in box.get("class", []):
+                continue
+
             # Ticker: div com classe tickerBox__title
             ticker_div = box.find("div", class_="tickerBox__title")
             if not ticker_div:
