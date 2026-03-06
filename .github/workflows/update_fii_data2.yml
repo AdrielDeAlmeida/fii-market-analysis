@@ -1,1 +1,40 @@
+name: Atualizar Dados FII no Supabase
 
+on:
+  schedule:
+    - cron: '10 13 * * 1-5'  # 10:10 BRT (abertura)
+    - cron: '10 22 * * 1-5'  # 19:10 BRT (fechamento)
+  workflow_dispatch:
+
+jobs:
+  update-data:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Instalar dependências Python
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Executar script de atualização
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python scrip2.py
+
+      - name: Notificar sucesso
+        if: success()
+        run: echo "✓ Dados atualizados com sucesso no Supabase!"
+
+      - name: Notificar falha
+        if: failure()
+        run: echo "✗ Erro ao atualizar dados. Verifique os logs acima."
