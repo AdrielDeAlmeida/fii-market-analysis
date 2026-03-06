@@ -147,8 +147,19 @@ def main():
     df["data_atualizacao"] = datetime.now().isoformat()
 
     # ── Supabase: limpa e insere ──────────────────────────────────────────────
-    log("Limpando dados antigos da tabela precoreal...")
-    supabase.table("precoreal").delete().neq("papel", "").execute()
+    log("Limpando todos os dados antigos da tabela 'precoreal' (apagando tudo para reescrever)...")
+    try:
+        # Busca todos os registros existentes e deleta em lotes para garantir que a tabela fique vazia
+        res = supabase.table("precoreal").select("papel").execute()
+        if res.data:
+            papeis = [row["papel"] for row in res.data]
+            for i in range(0, len(papeis), 100):
+                lote = papeis[i:i+100]
+                supabase.table("precoreal").delete().in_("papel", lote).execute()
+        log("Tabela limpa com sucesso!")
+    except Exception as e:
+        log(f"Aviso ao limpar tabela: {e}")
+
 
     records = df.to_dict("records")
     batch_size = 100
