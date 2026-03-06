@@ -46,9 +46,20 @@ def get_individual_fii_price(session, ticker, url):
                 valor_wrapper = valor_wrapper.parent
 
         if valor_wrapper:
-            txt = valor_wrapper.get_text(strip=True)
-            # Extrai apenas os números (ex: "R$ 64,02" -> "64.02")
-            match = re.search(r"R\$\s?([\d.,]+)", txt)
+            text_nodes = [t.strip() for t in valor_wrapper.find_all(string=True)]
+            for i, t in enumerate(text_nodes):
+                if 'R$' in t:
+                    # O preço real é logo no próximo texto após o R$
+                    for price_txt in text_nodes[i+1:]:
+                        if price_txt:
+                            match = re.search(r'^([\d.,]+)', price_txt)
+                            if match:
+                                val_str = match.group(1).replace(".", "").replace(",", ".")
+                                return float(val_str)
+            
+            # Fallback de segurança na busca antiga se os textos estiverem juntos
+            txt = valor_wrapper.get_text(separator=' ', strip=True)
+            match = re.search(r"R\$\s*([\d.]+,\d{1,2})", txt)
             if match:
                 val_str = match.group(1).replace(".", "").replace(",", ".")
                 return float(val_str)
