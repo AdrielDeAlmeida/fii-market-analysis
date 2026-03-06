@@ -1,7 +1,4 @@
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
+import requests
 import pandas as pd
 from io import StringIO
 import os
@@ -17,92 +14,60 @@ def log(message):
     print(f"[{timestamp}] {message}")
 
 def main():
-    driver = None
+
     try:
 
         supabase_url = os.getenv("SUPABASE_URL")
         supabase_key = os.getenv("SUPABASE_KEY")
 
         if not supabase_url or not supabase_key:
-            log("ERRO: Variáveis SUPABASE_URL e SUPABASE_KEY obrigatórias")
+            log("ERRO: Variáveis SUPABASE_URL e SUPABASE_KEY são obrigatórias")
             sys.exit(1)
 
         log("Conectando ao Supabase...")
         supabase: Client = create_client(supabase_url, supabase_key)
 
-        log("Configurando WebDriver...")
+        url = "https://www.fundamentus.com.br/fii_resultado.php"
 
-        options = webdriver.ChromeOptions()
-        options.add_argument("--headless")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--disable-gpu")
-        options.add_argument("user-agent=Mozilla/5.0")
+        log(f"Baixando dados de {url}")
 
-        driver = webdriver.Chrome(options=options)
+        headers = {
+            "User-Agent": "Mozilla/5.0"
+        }
 
-        # NOVA FONTE
-        url = "https://fiis.com.br/lista-de-fundos-imobiliarios/"
+        response = requests.get(url, headers=headers, timeout=30)
 
-        log(f"Acessando {url}")
+        if response.status_code != 200:
+            log(f"Erro HTTP {response.status_code}")
+            sys.exit(1)
 
-        driver.set_page_load_timeout(30)
-        driver.get(url)
+        log("Página carregada")
 
-        wait = WebDriverWait(driver, 30)
+        tables = pd.read_html(StringIO(response.text))
 
-        table = wait.until(
-            EC.presence_of_element_located((By.TAG_NAME, "table"))
-        )
+        if len(tables) == 0:
+            log("Nenhuma tabela encontrada")
+            sys.exit(1)
 
-        html_content = table.get_attribute("outerHTML")
+        df = tables[0]
 
-        log("Tabela carregada")
-
-        df = pd.read_html(StringIO(html_content))[0]
-
-        log(f"{len(df)} registros capturados")
-
-        # Ajustar nomes para manter padrão do script original
-        df = df.rename(columns={
-            "Ticker": "papel",
-            "Segmento": "segmento",
-            "Preço Atual": "cotacao",
-            "Dividend Yield": "dividend_yield",
-            "P/VP": "p_vp",
-            "Liquidez Diária": "liquidez",
-            "Qtd. Imóveis": "qtd_imoveis",
-            "Preço/m²": "preco_m2",
-            "Aluguel/m²": "aluguel_m2",
-            "Cap Rate": "cap_rate",
-            "Vacância Média": "vacancia_media"
-        })
-
-        # criar coluna que não existe na nova fonte
-        if "ffo_yield" not in df.columns:
-            df["ffo_yield"] = None
-
-        if "valor_mercado" not in df.columns:
-            df["valor_mercado"] = None
-
-        # manter ordem original
-        df = df[
-            [
-                "papel",
-                "segmento",
-                "cotacao",
-                "ffo_yield",
-                "dividend_yield",
-                "p_vp",
-                "valor_mercado",
-                "liquidez",
-                "qtd_imoveis",
-                "preco_m2",
-                "aluguel_m2",
-                "cap_rate",
-                "vacancia_media"
-            ]
+        df.columns = [
+            "papel",
+            "segmento",
+            "cotacao",
+            "ffo_yield",
+            "dividend_yield",
+            "p_vp",
+            "valor_mercado",
+            "liquidez",
+            "qtd_imoveis",
+            "preco_m2",
+            "aluguel_m2",
+            "cap_rate",
+            "vacancia_media"
         ]
+
+        log(f"{len(df)} registros encontrados")
 
         df["data_atualizacao"] = datetime.now().isoformat()
 
@@ -130,23 +95,16 @@ def main():
 
             total_inserted += len(batch)
 
-        log(f"Sucesso! {total_inserted} registros inseridos")
+        log(f"✓ Sucesso! {total_inserted} registros inseridos no Supabase")
 
     except Exception as e:
 
-        log(f"ERRO: {str(e)}")
+        log(f"✗ ERRO: {str(e)}")
 
         import traceback
         traceback.print_exc()
 
         sys.exit(1)
-
-    finally:
-
-        if driver:
-            driver.quit()
-            log("WebDriver fechado")
-
 
 if __name__ == "__main__":
     main()
