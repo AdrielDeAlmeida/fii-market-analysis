@@ -1,4 +1,4 @@
-name: Atualizar precos FII no Supabase
+name: Atualizar Dados FII no Supabase
 
 on:
   schedule:
@@ -29,7 +29,7 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        run: python script2.py
+        run: python precos/script2.py
 
       - name: Notificar sucesso
         if: success()
