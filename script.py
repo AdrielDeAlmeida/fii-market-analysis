@@ -68,6 +68,51 @@ def validate_data(records):
     return invalid_fields
 
 
+def filter_empty_required_fields(records, required_fields=None):
+    """
+    Remove registros que têm valores vazios/null em campos obrigatórios.
+    
+    Args:
+        records: Lista de dicionários
+        required_fields: Lista de campos que não podem ser vazios.
+                        Se None, usa campos padrão do FII
+    """
+    if required_fields is None:
+        # Campos obrigatórios para um FII válido
+        required_fields = ["papel", "cotacao", "segmento"]
+    
+    original_count = len(records)
+    filtered_records = []
+    removed_indices = []
+    
+    for idx, record in enumerate(records):
+        is_valid = True
+        
+        for field in required_fields:
+            value = record.get(field)
+            
+            # Verifica se o valor é vazio, None, ou string vazia
+            if value is None or (isinstance(value, str) and value.strip() == ""):
+                is_valid = False
+                break
+        
+        if is_valid:
+            filtered_records.append(record)
+        else:
+            removed_indices.append(idx)
+    
+    removed_count = len(removed_indices)
+    if removed_count > 0:
+        log(f"⚠️  {removed_count} registros removidos por campos obrigatórios vazios:")
+        for idx in removed_indices:
+            record = records[idx]
+            log(f"   - Índice {idx}: papel={record.get('papel')}, segmento={record.get('segmento')}")
+    
+    log(f"✓ {original_count} registros → {len(filtered_records)} registros válidos")
+    
+    return filtered_records
+
+
 def main():
 
     driver = None
@@ -169,6 +214,10 @@ def main():
         log("Validando dados...")
         validate_data(records)
         records = clean_float_values(records)
+        
+        # ✅ NOVO: Filtrar registros com campos obrigatórios vazios
+        log("Filtrando registros inválidos...")
+        records = filter_empty_required_fields(records)
         log("Dados limpos e prontos para inserção")
 
         # Limpar dados existentes
