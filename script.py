@@ -9,6 +9,7 @@ import sys
 from datetime import datetime
 from supabase import create_client, Client
 from dotenv import load_dotenv
+import math
 
 
 # Carregar variáveis de ambiente (para testes locais)
@@ -19,6 +20,52 @@ load_dotenv()
 def log(message):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] {message}")
+
+
+def clean_float_values(records):
+    """
+    Remove valores inválidos de float (NaN, inf, -inf) dos registros.
+    Converte para None para que o Supabase possa lidar com eles.
+    """
+    cleaned_records = []
+    
+    for record in records:
+        cleaned_record = {}
+        for key, value in record.items():
+            # Se for float e inválido, converte para None
+            if isinstance(value, float):
+                if math.isnan(value) or math.isinf(value):
+                    cleaned_record[key] = None
+                else:
+                    cleaned_record[key] = value
+            else:
+                cleaned_record[key] = value
+        cleaned_records.append(cleaned_record)
+    
+    return cleaned_records
+
+
+def validate_data(records):
+    """
+    Valida e reporta quais campos têm valores inválidos.
+    Útil para debug.
+    """
+    invalid_fields = {}
+    
+    for idx, record in enumerate(records):
+        for key, value in record.items():
+            if isinstance(value, float):
+                if math.isnan(value) or math.isinf(value):
+                    if key not in invalid_fields:
+                        invalid_fields[key] = []
+                    invalid_fields[key].append((idx, value))
+    
+    if invalid_fields:
+        log("⚠️  Valores inválidos encontrados nos seguintes campos:")
+        for field, occurrences in invalid_fields.items():
+            log(f"   - {field}: {len(occurrences)} ocorrência(s)")
+    
+    return invalid_fields
 
 
 def main():
@@ -115,13 +162,18 @@ def main():
         # Adicionar timestamp de atualização
         df["data_atualizacao"] = datetime.now().isoformat()
 
-        # Limpar dados existentes
-        log("Limpando dados antigos da tabela...")
-
-        supabase.table("fii_fundamentus").delete().neq("papel", "").execute()
-
         # Converter DataFrame para lista de dicionários
         records = df.to_dict("records")
+
+        # ✅ NOVO: Validar e limpar dados inválidos
+        log("Validando dados...")
+        validate_data(records)
+        records = clean_float_values(records)
+        log("Dados limpos e prontos para inserção")
+
+        # Limpar dados existentes
+        log("Limpando dados antigos da tabela...")
+        supabase.table("fii_fundamentus").delete().neq("papel", "").execute()
 
         # Inserir dados em lotes (limite do Supabase)
         batch_size = 100
