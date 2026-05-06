@@ -1,9 +1,12 @@
 name: Atualizar Dados FII no Supabase
 
 on:
-  # Executar automaticamente todos os dias às 9h (horário UTC)
+  # Executar automaticamente dois horários por dia
+  # 10:30 BRT = 13:30 UTC (UTC-3)
+  # 17:30 BRT = 20:30 UTC (UTC-3)
   schedule:
-    - cron: '10 13 * * *'
+    - cron: '30 13 * * *'  # 10:30 BRT
+    - cron: '30 20 * * *'  # 17:30 BRT
   # Permitir execução manual
   workflow_dispatch:
 
