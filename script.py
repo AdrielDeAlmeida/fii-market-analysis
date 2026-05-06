@@ -7,6 +7,7 @@ from io import StringIO
 import os
 import sys
 from datetime import datetime
+import pytz
 from supabase import create_client, Client
 from dotenv import load_dotenv
 import math
@@ -15,10 +16,14 @@ import math
 # Carregar variáveis de ambiente (para testes locais)
 load_dotenv()
 
+# Definir timezone de São Paulo
+SP_TZ = pytz.timezone('America/Sao_Paulo')
+
 
 # Configuração de logging
 def log(message):
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # Usar horário de São Paulo nos logs
+    timestamp = datetime.now(SP_TZ).strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] {message}")
 
 
@@ -204,18 +209,18 @@ def main():
 
         log(f"Total de {len(df)} registros extraídos")
 
-        # Adicionar timestamp de atualização
-        df["data_atualizacao"] = datetime.now().isoformat()
+        # Adicionar timestamp de atualização em horário de São Paulo
+        df["data_atualizacao"] = datetime.now(SP_TZ).isoformat()
 
         # Converter DataFrame para lista de dicionários
         records = df.to_dict("records")
 
-        # ✅ NOVO: Validar e limpar dados inválidos
+        # ✅ Validar e limpar dados inválidos
         log("Validando dados...")
         validate_data(records)
         records = clean_float_values(records)
         
-        # ✅ NOVO: Filtrar registros com campos obrigatórios vazios
+        # ✅ Filtrar registros com campos obrigatórios vazios
         log("Filtrando registros inválidos...")
         records = filter_empty_required_fields(records)
         log("Dados limpos e prontos para inserção")
