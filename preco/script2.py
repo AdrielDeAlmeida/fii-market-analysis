@@ -1,14 +1,12 @@
 import os
 import sys
 import time
-import random
 import re
 from datetime import datetime
 import pandas as pd
-import requests
-from bs4 import BeautifulSoup
 from supabase import create_client, Client
 from dotenv import load_dotenv
+
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -50,71 +48,77 @@ def process_fii_batch(fii_batch, worker_id):
     for ticker, url in fii_batch:
         try:
             driver.get(url)
-            # Espera até 15 segundos para a proteção do Cloudflare passar e o preço carregar
             wait = WebDriverWait(driver, 15)
             
-            try:
-                price_element = wait.until(
-                    EC.presence_of_element_located((By.CLASS_NAME, "headerTicker__content__price"))
-                )
-                text = price_element.text
-                
-                preco_val = None
-                var_val = 0.0
-                
-                # Extrair Preço (Regex procura por R$ seguido de números)
-                match_preco = re.search(r"R\$\s?([\d.,]+)", text)
-                if match_preco:
-                    preco_val = float(match_preco.group(1).replace(".", "").replace(",", "."))
-                    
-                # Extrair Variação (Regex procura por números seguidos de %)
-                match_var = re.search(r"([-+]?[\d.,]+)%", text)
-                if match_var:
-                    var_val = float(match_var.group(1).replace(".", "").replace(",", "."))
-                    
-                if preco_val is not None:
-                    records.append({
-                        "papel": ticker,
-                        "cotacao": preco_val,
-                        "variacao": var_val
-                    })
-            except Exception:
-                # Se não encontrar o elemento (FII não existe ou timeout), segue em frente
-                pass
-                
-            # Pequena pausa humana para evitar bloqueios agressivos
-            time.sleep(random.uniform(1.0, 2.5))
+            # Garante que o corpo da página carregou e aguarda o JS renderizar os preços
+            wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+            time.sleep(1.5)
             
+            # Pega o texto limpo de toda a parte superior da página (onde fica o cabeçalho)
+            page_text = driver.find_element(By.TAG_NAME, "body").text[:2500]
+            
+            preco_val = None
+            var_val = 0.0
+            
+            # Extrair Preço: procura por R$ seguido de números
+            match_preco = re.search(r"R\$\s?([\d.,]+)", page_text)
+            if match_preco:
+                preco_val = float(match_preco.group(1).replace(".", "").replace(",", "."))
+                
+            # Extrair Variação: procura por números seguidos de %
+            match_var = re.search(r"([-+]?[\d.,]+)%", page_text)
+            if match_var:
+                var_val = float(match_var.group(1).replace(".", "").replace(",", "."))
+                
+            if preco_val is not None:
+                records.append({
+                    "papel": ticker,
+                    "cotacao": preco_val,
+                    "variacao": var_val
+                })
+                
         except Exception:
-            pass
+            pass # Se der timeout em um FII específico, segue para o próximo
             
     driver.quit()
     return records
 
 def get_fii_data() -> pd.DataFrame:
     """
-    Busca a lista de FIIs via Regex e usa Selenium em paralelo para pegar a cotação real.
+    Busca a lista de FIIs no Fundamentus via Selenium (100% seguro) 
+    e usa 3 navegadores em paralelo para buscar os preços no FundsExplorer.
     """
-    url_lista = "https://fiis.com.br/lista-de-fundos-imobiliarios/"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
+    log("Iniciando driver principal para buscar a lista de FIIs no Fundamentus...")
+    driver = create_driver()
+    try:
+        driver.get("https://www.fundamentus.com.br/fii_resultado.php")
+        wait = WebDriverWait(driver, 15)
+        
+        table = wait.until(EC.presence_of_element_located((By.ID, "tabelaResultado")))
+        html = table.get_attribute("outerHTML")
+        
+        # O Regex varre a tabela procurando o padrão exato de FIIs (Ex: MXRF11, KNRI11)
+        tickers_encontrados = set(re.findall(r'\b[A-Z]{4}11\b', html.upper()))
+        
+    except Exception as e:
+        log(f"Erro ao obter a lista de FIIs: {e}")
+        tickers_encontrados = set()
+    finally:
+        driver.quit()
 
-    log("Coletando lista de FIIs...")
-    resp = requests.get(url_lista, headers=headers, timeout=30)
-    resp.raise_for_status()
-    
-    # Busca apenas o padrão do Ticker no texto puro, ignorando problemas de HTML
-    tickers_encontrados = set(re.findall(r'\b[A-Z]{4}11\b', resp.text.upper()))
-    
+    if not tickers_encontrados:
+        log("ERRO: Nenhum Ticker encontrado. Abortando coleta.")
+        return pd.DataFrame()
+
+    # Monta as URLs para o FundsExplorer
     fii_links = []
     for ticker in tickers_encontrados:
         fii_links.append((ticker, f"https://www.fundsexplorer.com.br/funds/{ticker.lower()}"))
 
+    log(f"Lista obtida com sucesso! {len(fii_links)} FIIs encontrados.")
     log(f"Iniciando coleta de preços para {len(fii_links)} FIIs usando Selenium...")
     
-    # Divide a lista de FIIs em 3 lotes para rodar em 3 navegadores paralelos. 
-    # Isso evita estourar a memória (RAM) limitada do GitHub Actions (7GB).
+    # Divide os FIIs em 3 lotes para rodar em 3 abas paralelas (evita erro de memória no GitHub Actions)
     num_workers = 3
     batch_size = (len(fii_links) // num_workers) + 1
     batches = [fii_links[i:i + batch_size] for i in range(0, len(fii_links), batch_size)]
